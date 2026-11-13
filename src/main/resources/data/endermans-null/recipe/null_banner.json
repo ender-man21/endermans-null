@@ -1,0 +1,18 @@
+{
+	"type": "minecraft:crafting_shaped",
+	"category": "equipment",
+	"pattern": [
+		" B ",
+		" E ",
+		" S "
+	],
+	"key": {
+		"B": "minecraft:black_banner",
+		"E": "minecraft:ender_eye",
+		"S": "minecraft:stick"
+	},
+	"result": {
+		"id": "endermans-null:null_banner",
+		"count": 1
+	}
+}

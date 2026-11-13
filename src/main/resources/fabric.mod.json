@@ -1,0 +1,37 @@
+{
+	"schemaVersion": 1,
+	"id": "endermans-null",
+	"version": "${version}",
+	"name": "Enderman's Null",
+	"description": "Null warriors from Unstable SMP lore: summon an army with the Totem of Null and command it with the Banner of Null.",
+	"authors": [
+		"Enderman21"
+	],
+	"contact": {
+		"sources": "https://github.com/"
+	},
+	"license": "All-Rights-Reserved",
+	"icon": "assets/endermans-null/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"enderman21.nullarmy.EndermanSNull"
+		],
+		"client": [
+			"enderman21.nullarmy.client.EndermanSNullClient"
+		]
+	},
+	"mixins": [
+		"endermans-null.mixins.json",
+		{
+			"config": "endermans-null.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
