@@ -1,6 +1,9 @@
 {
 	"required": true,
 	"package": "enderman21.nullarmy.client.mixin",
+	"client": [
+		"EntityGlowMixin"
+	],
 	"compatibilityLevel": "JAVA_25",
 	"injectors": {
 		"defaultRequire": 1

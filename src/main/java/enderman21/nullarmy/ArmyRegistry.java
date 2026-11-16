@@ -30,6 +30,10 @@ public final class ArmyRegistry {
 		public double x;
 		public double y;
 		public double z;
+		/** Это командир (не входит в лимит армии, один на тотем). */
+		public boolean commander;
+		/** Режим командира (порядковый номер NullWarrior.CommanderMode), нужен меню, когда он не загружен. */
+		public int commanderMode;
 		/** Сколько проверок подряд воина не нашли в загруженном чанке. */
 		public int missed;
 
@@ -103,8 +107,10 @@ public final class ArmyRegistry {
 		if (id.isEmpty() || !(warrior.level() instanceof ServerLevel level)) {
 			return;
 		}
-		data.computeIfAbsent(id, k -> new HashMap<>())
-				.put(warrior.getUUID().toString(), new Entry(dimKey(level), warrior.getX(), warrior.getY(), warrior.getZ()));
+		Entry entry = new Entry(dimKey(level), warrior.getX(), warrior.getY(), warrior.getZ());
+		entry.commander = warrior.getRank() == NullWarrior.Rank.COMMANDER;
+		entry.commanderMode = warrior.getCommanderMode().ordinal();
+		data.computeIfAbsent(id, k -> new HashMap<>()).put(warrior.getUUID().toString(), entry);
 		dirty = true;
 	}
 
@@ -129,7 +135,9 @@ public final class ArmyRegistry {
 				Entry e = en.getValue();
 				for (ServerLevel level : server.getAllLevels()) {
 					if (dimKey(level).equals(e.dim)) {
-						if (level.hasChunk(((int) Math.floor(e.x)) >> 4, ((int) Math.floor(e.z)) >> 4) && ++e.missed >= 3) {
+						// Считаем промах, только если загружена вся область 3x3 вокруг записанной позиции:
+						// воин мог отойти в соседний чанк, который уже выгружен, и он жив
+						if (areaLoaded(level, ((int) Math.floor(e.x)) >> 4, ((int) Math.floor(e.z)) >> 4) && ++e.missed >= 3) {
 							it.remove();
 							dirty = true;
 						}
@@ -139,6 +147,17 @@ public final class ArmyRegistry {
 			}
 		}
 		data.values().removeIf(Map::isEmpty);
+	}
+
+	private static boolean areaLoaded(ServerLevel level, int cx, int cz) {
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				if (!level.hasChunk(cx + dx, cz + dz)) {
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	public static void remove(String armyId, UUID warrior) {
@@ -165,6 +184,36 @@ public final class ArmyRegistry {
 	public static int count(String armyId) {
 		Map<String, Entry> army = data.get(armyId);
 		return army == null ? 0 : army.size();
+	}
+
+	public static int commanderCount(String armyId) {
+		Map<String, Entry> army = data.get(armyId);
+		int n = 0;
+		if (army != null) {
+			for (Entry e : army.values()) {
+				if (e.commander) {
+					n++;
+				}
+			}
+		}
+		return n;
+	}
+
+	public static int commanderMode(String armyId) {
+		Map<String, Entry> army = data.get(armyId);
+		if (army != null) {
+			for (Entry e : army.values()) {
+				if (e.commander) {
+					return e.commanderMode;
+				}
+			}
+		}
+		return 0;
+	}
+
+	/** Сколько воинов в армии без командира (именно они считаются в лимите). */
+	public static int regularCount(String armyId) {
+		return count(armyId) - commanderCount(armyId);
 	}
 
 	public static Map<String, Entry> entries(String armyId) {

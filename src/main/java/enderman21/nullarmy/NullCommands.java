@@ -36,7 +36,8 @@ public class NullCommands {
 						// Приказы армии: нужны тотем в инвентаре
 						.then(mode("follow", NullWarrior.Mode.FOLLOW))
 						.then(mode("hold", NullWarrior.Mode.HOLD))
-						.then(mode("guard", NullWarrior.Mode.GUARD))));
+						.then(mode("guard", NullWarrior.Mode.GUARD))
+						.then(mode("cursor", NullWarrior.Mode.CURSOR))));
 	}
 
 	private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack> mode(String name, NullWarrior.Mode mode) {

@@ -26,16 +26,37 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.CustomData;
 import net.minecraft.world.item.enchantment.Enchantment;
 import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 /** Вся серверная логика армии игрока: тотем, учёт, призыв, приказы, передача. */
 public final class NullArmy {
-	public static final int MAX_ARMY = 20;
-	public static final int LEVEL_COST = 5;
+	public static final int MAX_ARMY = NullConfig.maxArmy;
+	public static final int LEVEL_COST = NullConfig.levelCost;
+	/** Цена призыва командира (уровни опыта). */
+	public static final int COMMANDER_COST = NullConfig.commanderCost;
+	/** Каждый десятый воин армии вместо рядового призывается генералом. */
+	public static final int GENERAL_EVERY = NullConfig.generalEvery;
 	/** Границы дистанции, на которой воины держатся от владельца (блоки). */
 	public static final int MIN_DISTANCE = 3;
 	public static final int MAX_DISTANCE = 16;
 	public static final int DEFAULT_DISTANCE = 6;
+	/** Режим «За курсором»: максимальная дальность точки, куда смотрит владелец (блоки). */
+	public static final double CURSOR_RANGE = NullConfig.cursorRange;
+
+	/** Точка, на которую смотрит владелец, не дальше CURSOR_RANGE; null, если взгляд в небо или пустоту. */
+	public static Vec3 cursorPoint(Player owner) {
+		Vec3 eye = owner.getEyePosition();
+		Vec3 look = owner.getLookAngle();
+		BlockHitResult hit = owner.level().clip(new ClipContext(eye, eye.add(look.scale(CURSOR_RANGE)),
+				ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, owner));
+		if (hit.getType() == HitResult.Type.MISS) {
+			return null;
+		}
+		return hit.getLocation().subtract(look.scale(0.6));
+	}
 
 	private static final String TOTEM_KEY = "NullArmy";
 
@@ -146,7 +167,7 @@ public final class NullArmy {
 			return false;
 		}
 		String armyId = ensureArmyId(totem);
-		if (ArmyRegistry.count(armyId) >= MAX_ARMY) {
+		if (ArmyRegistry.regularCount(armyId) >= MAX_ARMY) {
 			player.sendSystemMessage(Component.translatable("message.endermans-null.army_full", MAX_ARMY), true);
 			return false;
 		}
@@ -165,8 +186,125 @@ public final class NullArmy {
 		return true;
 	}
 
-	/** Создаёт воина перед игроком и отдаёт ему во владение (без оплаты). */
+	/** Призыв командира: отдельная кнопка меню знамени, один на тотем, цена COMMANDER_COST уровней. */
+	public static boolean summonCommander(ServerPlayer player) {
+		ItemStack totem = firstTotem(player);
+		if (totem.isEmpty()) {
+			return false;
+		}
+		String armyId = ensureArmyId(totem);
+		if (CommanderStore.isActive(armyId)) {
+			player.sendSystemMessage(Component.translatable("message.endermans-null.commander_exists"), true);
+			return false;
+		}
+		// Первый призыв стоит уровни, дальше включение бесплатно (пока командир жив)
+		boolean charge = !CommanderStore.isPaid(armyId) && !player.isCreative();
+		if (charge && player.experienceLevel < COMMANDER_COST) {
+			player.sendSystemMessage(Component.translatable("message.endermans-null.need_levels", COMMANDER_COST), true);
+			return false;
+		}
+		NullWarrior commander = summon(player, armyId, NullWarrior.Rank.COMMANDER);
+		if (commander == null) {
+			return false;
+		}
+		if (charge) {
+			player.giveExperienceLevels(-COMMANDER_COST);
+		}
+		CommanderStore.activate(armyId, commander.getUUID());
+		NullWarrior.CommanderMode saved = NullWarrior.CommanderMode.byId(CommanderStore.mode(armyId));
+		if (saved != NullWarrior.CommanderMode.LEAD) {
+			commander.setCommanderMode(saved);
+		}
+		player.sendSystemMessage(Component.translatable("message.endermans-null.commander_summoned"), true);
+		sendCommanderState(player);
+		return true;
+	}
+
+	/** Отзывает командира где бы он ни был, без трат: загруженный исчезает сразу, из незагруженного чанка при загрузке. */
+	public static void dismissCommander(ServerPlayer player) {
+		MinecraftServer server = player.level().getServer();
+		if (server == null) {
+			return;
+		}
+		ItemStack totem = firstTotem(player);
+		String armyId = totem.isEmpty() ? "" : armyIdOf(totem);
+		if (armyId.isEmpty() || !CommanderStore.isActive(armyId)) {
+			sendCommanderState(player);
+			return;
+		}
+		CommanderStore.deactivate(armyId);
+		for (java.util.Map.Entry<String, ArmyRegistry.Entry> e : ArmyRegistry.entries(armyId).entrySet()) {
+			if (e.getValue().commander) {
+				try {
+					ArmyRegistry.remove(armyId, UUID.fromString(e.getKey()));
+				} catch (IllegalArgumentException ignored) {
+				}
+			}
+		}
+		for (NullWarrior w : warriorsOfArmy(server, armyId)) {
+			if (w.isCommander() && w.level() instanceof ServerLevel level) {
+				vanish(w, level);
+			}
+		}
+		player.sendSystemMessage(Component.translatable("message.endermans-null.commander_dismissed"), true);
+		sendCommanderState(player);
+	}
+
+	/** Загруженный командир игрока, если есть. */
+	public static NullWarrior findCommander(MinecraftServer server, ServerPlayer owner) {
+		for (NullWarrior w : warriorsOf(server, owner.getUUID())) {
+			if (w.isCommander()) {
+				return w;
+			}
+		}
+		return null;
+	}
+
+	/** Переключает режим командира (Lead, Survey, Protect), если он загружен. */
+	public static void setCommanderMode(ServerPlayer player, int modeId) {
+		MinecraftServer server = player.level().getServer();
+		if (server == null) {
+			return;
+		}
+		NullWarrior commander = findCommander(server, player);
+		if (commander == null) {
+			player.sendSystemMessage(Component.translatable("message.endermans-null.commander_missing"), true);
+			return;
+		}
+		NullWarrior.CommanderMode mode = NullWarrior.CommanderMode.byId(modeId);
+		commander.setCommanderMode(mode);
+		if (!commander.getArmyId().isEmpty()) {
+			CommanderStore.setMode(commander.getArmyId(), mode.ordinal());
+		}
+		player.sendSystemMessage(Component.translatable("message.endermans-null.commander_mode",
+				Component.translatable(mode.translationKey())), true);
+		sendCommanderState(player);
+	}
+
+	/** Отправляет клиенту меню: есть ли у армии командир и в каком он режиме. */
+	public static void sendCommanderState(ServerPlayer player) {
+		ItemStack totem = firstTotem(player);
+		if (totem.isEmpty()) {
+			return;
+		}
+		String armyId = armyIdOf(totem);
+		boolean exists = !armyId.isEmpty() && CommanderStore.isActive(armyId);
+		boolean paid = !armyId.isEmpty() && CommanderStore.isPaid(armyId);
+		int mode = !exists ? 0 : (ArmyRegistry.commanderCount(armyId) > 0
+				? ArmyRegistry.commanderMode(armyId) : CommanderStore.mode(armyId));
+		net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.send(player,
+				new enderman21.nullarmy.network.CommanderStatePayload(exists, mode, paid));
+	}
+
+	/** Обычный призыв: по квоте каждый GENERAL_EVERY-й воин армии становится генералом. */
 	public static NullWarrior summon(ServerPlayer player, String armyId) {
+		int next = ArmyRegistry.regularCount(armyId) + 1;
+		return summon(player, armyId, next % GENERAL_EVERY == 0
+				? NullWarrior.Rank.GENERAL : NullWarrior.Rank.SOLDIER);
+	}
+
+	/** Создаёт воина перед игроком и отдаёт ему во владение (без оплаты). */
+	public static NullWarrior summon(ServerPlayer player, String armyId, NullWarrior.Rank rank) {
 		if (!(player.level() instanceof ServerLevel level)) {
 			return null;
 		}
@@ -183,7 +321,7 @@ public final class NullArmy {
 		warrior.setYRot(player.getYRot() + 180.0F);
 		warrior.setOwner(player);
 		warrior.setArmyId(armyId);
-		NullGear.equip(warrior);
+		NullGear.equip(warrior, rank);
 		level.addFreshEntity(warrior);
 		ArmyRegistry.update(warrior);
 
@@ -201,6 +339,9 @@ public final class NullArmy {
 		}
 		net.minecraft.core.BlockPos flag = mode == NullWarrior.Mode.GUARD ? FlagManager.plant(owner) : null;
 		for (NullWarrior w : warriorsOf(server, owner.getUUID())) {
+			if (!w.obeysArmy()) {
+				continue;
+			}
 			if (flag != null) {
 				w.guardHere(flag);
 			} else {
@@ -213,7 +354,9 @@ public final class NullArmy {
 		MinecraftServer server = owner.level().getServer();
 		if (server != null) {
 			for (NullWarrior w : warriorsOf(server, owner.getUUID())) {
-				w.setFormation(formation);
+				if (w.obeysArmy()) {
+					w.setFormation(formation);
+				}
 			}
 		}
 	}
@@ -222,7 +365,9 @@ public final class NullArmy {
 		MinecraftServer server = owner.level().getServer();
 		if (server != null) {
 			for (NullWarrior w : warriorsOf(server, owner.getUUID())) {
-				w.setBehavior(behavior);
+				if (w.obeysArmy()) {
+					w.setBehavior(behavior);
+				}
 			}
 		}
 	}
@@ -233,7 +378,7 @@ public final class NullArmy {
 			return;
 		}
 		for (NullWarrior w : warriorsOf(server, owner.getUUID())) {
-			if (w.canAttack(target)) {
+			if (w.obeysArmy() && w.canAttack(target)) {
 				w.orderAttack(target);
 			}
 		}
@@ -246,7 +391,9 @@ public final class NullArmy {
 		}
 		int clamped = Math.max(MIN_DISTANCE, Math.min(MAX_DISTANCE, distance));
 		for (NullWarrior w : warriorsOf(server, owner.getUUID())) {
-			w.setFollowDistance(clamped);
+			if (w.obeysArmy()) {
+				w.setFollowDistance(clamped);
+			}
 		}
 	}
 

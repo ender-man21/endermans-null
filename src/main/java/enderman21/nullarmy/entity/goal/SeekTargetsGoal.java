@@ -18,7 +18,7 @@ import net.minecraft.world.entity.player.Player;
  * RAID: всё живое, кроме владельца, своих, игроков, жителей, прирученных животных и стоек для брони.
  */
 public class SeekTargetsGoal extends Goal {
-	private static final double RANGE = 16.0;
+	private static final double RANGE = enderman21.nullarmy.NullConfig.targetSearchRange;
 
 	private final NullWarrior warrior;
 	private LivingEntity found;
@@ -55,7 +55,7 @@ public class SeekTargetsGoal extends Goal {
 			return e instanceof Enemy;
 		}
 		String type = BuiltInRegistries.ENTITY_TYPE.getKey(e.getType()).getPath();
-		return !(e instanceof Player)
+		return (enderman21.nullarmy.NullConfig.raidAttacksPlayers || !(e instanceof Player))
 				&& !type.equals("villager")
 				&& !type.equals("wandering_trader")
 				&& !(e instanceof ArmorStand)

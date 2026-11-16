@@ -21,6 +21,8 @@ public class EndermanSNull implements ModInitializer {
 		ArmyRegistry.register();
 		ArmyCall.register();
 		FlagManager.register();
+		CommanderStore.register();
+		CommanderSupport.register();
 		LOGGER.info("Enderman's Null loaded");
 	}
 
