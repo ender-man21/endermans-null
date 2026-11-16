@@ -39,15 +39,33 @@ import net.minecraft.world.phys.Vec3;
  * Работает и между измерениями.
  */
 public final class ArmyCall {
-	public static final int COOLDOWN_TICKS = 600;
-	private static final int LOAD_TIMEOUT = 100;
+	public static final int COOLDOWN_TICKS = NullConfig.callCooldownSeconds * 20;
+	/** Сколько тиков ждём, пока подгрузятся чанки и сущности воина (15 секунд). */
+	private static final int LOAD_TIMEOUT = 300;
 	private static final double RANGE = 64.0;
 
 	private static final Map<UUID, Long> LAST = new HashMap<>();
 	private static final List<Task> TASKS = new ArrayList<>();
 	private static final Random RANDOM = new Random();
+	/**
+	 * Счётчик принудительной загрузки чанков: ключ "измерение|x|z" -> сколько задач держат чанк.
+	 * Чанк отпускаем только когда его больше никто не ждёт (раньше первый приземлившийся воин
+	 * отпускал чанк, и остальные воины из того же чанка пропадали из зова).
+	 */
+	private static final Map<String, Integer> FORCED = new HashMap<>();
+
+	/** Итоги одного зова: сколько воинов позвано, прибыло и почему не прибыли остальные. */
+	private static final class Stats {
+		UUID caller;
+		int total;
+		int finished;
+		int arrived;
+		int notFound;
+		int vanished;
+	}
 
 	private static final class Task {
+		Stats stats;
 		UUID warrior;
 		ServerLevel src;
 		int cx;
@@ -95,6 +113,8 @@ public final class ArmyCall {
 
 		Vec3 target = aim(level, player);
 		int index = 0;
+		Stats stats = new Stats();
+		stats.caller = player.getUUID();
 		for (String id : ids) {
 			for (Map.Entry<String, ArmyRegistry.Entry> e : ArmyRegistry.entries(id).entrySet()) {
 				ServerLevel src = levelByKey(server, e.getValue().dim);
@@ -113,6 +133,7 @@ public final class ArmyCall {
 				t.dest = level;
 				t.target = target;
 				t.armyId = id;
+				t.stats = stats;
 				t.delay = index * 2;
 				TASKS.add(t);
 				index++;
@@ -122,6 +143,7 @@ public final class ArmyCall {
 			player.sendSystemMessage(Component.translatable("message.endermans-null.call_nobody"), true);
 			return;
 		}
+		stats.total = index;
 		LAST.put(player.getUUID(), now);
 		player.sendSystemMessage(Component.translatable("message.endermans-null.army_called", index), true);
 		level.playSound(null, player.getX(), player.getY(), player.getZ(),
@@ -158,6 +180,7 @@ public final class ArmyCall {
 			release(t);
 		}
 		TASKS.clear();
+		FORCED.clear();
 		LAST.clear();
 	}
 
@@ -183,17 +206,28 @@ public final class ArmyCall {
 			Entity e = t.src.getEntity(t.warrior);
 			if (!(e instanceof NullWarrior warrior)) {
 				if (!t.forced) {
-					t.src.setChunkForced(t.cx, t.cz, true);
-					t.forced = true;
+					force(t);
 				}
 				if (++t.waited > LOAD_TIMEOUT) {
-					if (t.src.hasChunk(t.cx, t.cz)) {
-						ArmyRegistry.remove(t.armyId, t.warrior); // воина там нет
+					// Воина нет и в полностью загруженной области: его правда там нет
+					if (areaLoaded(t.src, t.cx, t.cz)) {
+						ArmyRegistry.remove(t.armyId, t.warrior);
 					}
+					EndermanSNull.LOGGER.warn("Call: warrior {} not found near {}, {} ({}) after {} ticks",
+							t.warrior, t.cx, t.cz, ArmyRegistry.dimKey(t.src), t.waited);
+					t.stats.notFound++;
 					release(t);
+					finish(t);
 					return true;
 				}
 				return false;
+			}
+			if (!t.forced) {
+				// Воин уже загружен (чанк ещё не успел выгрузиться после телепорта игрока): держим его чанки
+				// на время падения жемчуга, иначе чанк выгрузится и воин пропадёт до приземления
+				t.cx = ((int) Math.floor(warrior.getX())) >> 4;
+				t.cz = ((int) Math.floor(warrior.getZ())) >> 4;
+				force(t);
 			}
 			launch(t, warrior);
 			return false;
@@ -201,8 +235,14 @@ public final class ArmyCall {
 		if (--t.fallLeft > 0) {
 			return false;
 		}
-		land(t);
+		boolean ok = land(t);
+		if (ok) {
+			t.stats.arrived++;
+		} else {
+			t.stats.vanished++;
+		}
 		release(t);
+		finish(t);
 		return true;
 	}
 
@@ -242,13 +282,29 @@ public final class ArmyCall {
 		warrior.getNavigation().stop();
 	}
 
-	private static void land(Task t) {
+	/** Когда все задачи зова закончены, владелец видит итог: прибыло X из Y. */
+	private static void finish(Task t) {
+		Stats s = t.stats;
+		if (++s.finished < s.total) {
+			return;
+		}
+		EndermanSNull.LOGGER.info("Call finished: {} of {} arrived (not found {}, lost on landing {})",
+				s.arrived, s.total, s.notFound, s.vanished);
+		ServerPlayer player = t.dest.getServer().getPlayerList().getPlayer(s.caller);
+		if (player != null) {
+			player.sendSystemMessage(Component.translatable("message.endermans-null.call_result",
+					s.arrived, s.total), true);
+		}
+	}
+
+	private static boolean land(Task t) {
 		if (t.pearl != null && !t.pearl.isRemoved()) {
 			t.pearl.discard();
 		}
 		Entity e = t.src.getEntity(t.warrior);
 		if (!(e instanceof NullWarrior warrior)) {
-			return;
+			EndermanSNull.LOGGER.warn("Call: warrior {} vanished before landing", t.warrior);
+			return false;
 		}
 		puff(t.src, warrior.position());
 		Entity result = warrior;
@@ -266,6 +322,7 @@ public final class ArmyCall {
 			ArmyRegistry.update(w);
 		}
 		puff(t.dest, t.landing);
+		return true;
 	}
 
 	private static void puff(ServerLevel level, Vec3 pos) {
@@ -274,11 +331,50 @@ public final class ArmyCall {
 		level.playSound(null, pos.x, pos.y, pos.z, SoundEvents.ENDERMAN_TELEPORT, SoundSource.HOSTILE, 1.0F, 0.8F);
 	}
 
-	private static void release(Task t) {
-		if (t.forced) {
-			t.src.setChunkForced(t.cx, t.cz, false);
-			t.forced = false;
+	/** Грузим область 3x3 чанка вокруг записанной позиции: воин мог отойти от неё до выгрузки. */
+	private static void force(Task t) {
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				String key = ArmyRegistry.dimKey(t.src) + "|" + (t.cx + dx) + "|" + (t.cz + dz);
+				if (FORCED.merge(key, 1, Integer::sum) == 1) {
+					t.src.setChunkForced(t.cx + dx, t.cz + dz, true);
+				}
+			}
 		}
+		t.forced = true;
+	}
+
+	private static void release(Task t) {
+		if (!t.forced) {
+			return;
+		}
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				String key = ArmyRegistry.dimKey(t.src) + "|" + (t.cx + dx) + "|" + (t.cz + dz);
+				Integer n = FORCED.get(key);
+				if (n == null) {
+					continue;
+				}
+				if (n <= 1) {
+					FORCED.remove(key);
+					t.src.setChunkForced(t.cx + dx, t.cz + dz, false);
+				} else {
+					FORCED.put(key, n - 1);
+				}
+			}
+		}
+		t.forced = false;
+	}
+
+	private static boolean areaLoaded(ServerLevel level, int cx, int cz) {
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				if (!level.hasChunk(cx + dx, cz + dz)) {
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	/** Ближайшая свободная точка с опорой под ногами (ищем по вертикали вокруг заданной). */

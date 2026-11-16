@@ -30,7 +30,8 @@ public class DefendOwnerGoal extends TargetGoal {
 	public boolean canUse() {
 		Player owner = warrior.getOwner();
 		if (owner == null || warrior.getMode() == NullWarrior.Mode.ATTACK
-				|| warrior.getBehavior() == NullWarrior.Behavior.PASSIVE) {
+				|| warrior.getBehavior() == NullWarrior.Behavior.PASSIVE
+				|| warrior.getBehavior() == NullWarrior.Behavior.PACIFIST) {
 			return false;
 		}
 		this.candidate = attackersOfOwner ? owner.getLastHurtByMob() : owner.getLastHurtMob();

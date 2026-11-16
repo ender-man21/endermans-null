@@ -75,8 +75,16 @@ public final class ArmyManager {
 		}
 		for (List<NullWarrior> list : armies.values()) {
 			list.sort(java.util.Comparator.comparing(NullWarrior::getUUID));
-			for (int i = 0; i < list.size(); i++) {
-				list.get(i).setSlot(i, list.size());
+			List<NullWarrior> inFormation = new java.util.ArrayList<>();
+			for (NullWarrior w : list) {
+				if (w.obeysArmy()) {
+					inFormation.add(w);
+				} else {
+					w.setSlot(0, 1);
+				}
+			}
+			for (int i = 0; i < inFormation.size(); i++) {
+				inFormation.get(i).setSlot(i, inFormation.size());
 			}
 		}
 		if (server.getTickCount() % 40 == 0) {
